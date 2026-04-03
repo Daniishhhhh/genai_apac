@@ -75,65 +75,61 @@ def get_db_connection():
     print(f"  Connecting directly → {host}:{port}/{db}")
     print(f"  User: {env['DB_USER']} (encoded for URL)")
 
+    # AFTER
     return sqlalchemy.create_engine(
-        connection_url,
-        pool_pre_ping=True,
-        pool_recycle=1800,
-        connect_args={"ssl_context": True},
-    )
+    connection_url,
+    pool_pre_ping=True,
+    pool_recycle=1800,
+    connect_args={"ssl_context": False},   # AlloyDB on public IP: plain TCP, no SSL
+)
+
+# Remove the 'import vertexai' and 'vertexai.init' lines
+
+# Inside tools/fssai_rag_tool.py
+
+# tools/fssai_rag_tool.py
+
 def query_fssai_regulations(claim: str, nutrient_context: str) -> dict:
-    """MCP Tool: Vector similarity search on FSSAI regulation database."""
-    import google.auth, google.auth.transport.requests, requests as http_requests
+    import requests as http_requests
+    import sqlalchemy
 
-    # Get embedding via REST (same pattern as seed_db.py)
-    credentials, _ = google.auth.default(
-        scopes=["https://www.googleapis.com/auth/cloud-platform"]
-    )
-    credentials.refresh(google.auth.transport.requests.Request())
-
-    project_id = os.getenv("GOOGLE_CLOUD_PROJECT")
-    region     = os.getenv("GOOGLE_CLOUD_LOCATION", "us-central1")
+    api_key = os.getenv("GOOGLE_API_KEY")
     query_text = f"FSSAI regulation for claim: {claim}. Nutrients: {nutrient_context}"
 
-    resp = http_requests.post(
-        f"https://{region}-aiplatform.googleapis.com/v1/projects/{project_id}"
-        f"/locations/{region}/publishers/google/models/text-embedding-004:predict",
-        headers={
-            "Authorization": f"Bearer {credentials.token}",
-            "Content-Type": "application/json",
-        },
-        json={"instances": [{"content": query_text, "task_type": "RETRIEVAL_QUERY"}]},
-        timeout=30,
-    )
-    resp.raise_for_status()
-    query_embedding = resp.json()["predictions"][0]["embeddings"]["values"]
-    emb_str = str(query_embedding)
+    # We use v1beta to support outputDimensionality
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-001:embedContent?key={api_key}"
 
+    payload = {
+        "content": {"parts": [{"text": query_text}]},
+        "taskType": "RETRIEVAL_QUERY",
+        "outputDimensionality": 768  # <--- THIS FIXES THE DIMENSION ERROR
+    }
+
+    resp = http_requests.post(url, json=payload, timeout=30)
+    resp.raise_for_status()
+    
+    query_embedding = resp.json()["embedding"]["values"]
+    
+    # Ensure the database connection uses the correct host/port
     engine = get_db_connection()
     with engine.connect() as conn:
-        # KEY FIX: pass embedding ONCE as :emb, reference it twice via CTE
         result = conn.execute(
             sqlalchemy.text("""
-                WITH query_vec AS (
-                    SELECT CAST(:emb AS vector) AS vec
-                )
-                SELECT
-                    r.regulation_text,
-                    r.claim_type,
-                    r.threshold_value,
-                    r.threshold_unit,
-                    1 - (r.embedding <=> q.vec) AS similarity
-                FROM fssai_regulations r, query_vec q
-                ORDER BY r.embedding <=> q.vec
+                SELECT regulation_text, claim_type, threshold_value, threshold_unit,
+                1 - (embedding <=> CAST(:emb AS vector)) AS similarity
+                FROM fssai_regulations
+                ORDER BY embedding <=> CAST(:emb AS vector)
                 LIMIT 3
             """),
-            {"emb": emb_str}
+            {"emb": str(query_embedding)}
         )
         rows = result.fetchall()
 
-    if not rows:
-        return {"found": False, "claim": claim}
-
+    if not rows: return {"found": False}
+    top = rows[0]
+    return {
+        "found": True, "regulation_text": top[0], "similarity_score": float(top[4])
+    }
     top = rows[0]
     return {
         "found": True,
@@ -142,6 +138,5 @@ def query_fssai_regulations(claim: str, nutrient_context: str) -> dict:
         "claim_type": top[1],
         "threshold_value": top[2],
         "threshold_unit": top[3],
-        "similarity_score": float(top[4]),
-        "supporting_regulations": [r[0] for r in rows[1:]],
+        "similarity_score": float(top[4])
     }

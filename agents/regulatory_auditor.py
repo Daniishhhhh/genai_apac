@@ -142,12 +142,18 @@ def audit_label_claims(extracted_label_json: str) -> dict:
 
 audit_tool = FunctionTool(func=audit_label_claims)
 
+# In agents/regulatory_auditor.py
+
 RegulatoryAuditorAgent = LlmAgent(
     name="RegulatoryAuditorAgent",
     model=os.getenv("GOOGLE_GENAI_MODEL", "gemini-2.5-flash"),
-    description="Constraint-based FSSAI compliance auditor.",
-    instruction="""You are an FSSAI Compliance Officer using constraint-based auditing.
-Call audit_label_claims with the extracted label JSON string.
-Return the full audit result. Do NOT provide medical advice.""",
-    tools=[audit_tool],
+    instruction="""You are an uncompromising FSSAI Compliance Auditor. Cross-reference label data against Indian food safety laws AND the user's specific health profile.
+
+1. Extract 'nutrients', 'ingredients', 'health_claims', and 'mandatory_warnings' from the LabelExtractorAgent's JSON.
+2. BASELINE FSSAI LIMITS: If Saturated Fat > 10g or Sodium > 300mg per 100g, flag this as 'High Risk' (HFSS). 
+3. CRITICAL PROFILE OVERRIDES (HARD STOPS):
+   - If Profile is "Child (under 12)" OR "Pregnant": Check 'mandatory_warnings' and 'ingredients' for Caffeine, Taurine, or Ginseng. If found, you MUST set overall_status to NON_COMPLIANT and flag it as a SEVERE HEALTH VIOLATION.
+   - If Profile is "Diabetic": Check 'total_sugars_g'. If it exceeds 5g per serving, flag as HIGH CONCERN.
+4. Output a structured, authoritative FSSAI audit report.""",
+    tools=[audit_tool], # Ensure your tool name matches here
 )

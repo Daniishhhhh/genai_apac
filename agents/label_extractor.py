@@ -1,82 +1,98 @@
 import os
-from typing import Optional, List # Ensure Optional is here
 import json
-from pydantic import BaseModel
+import mimetypes
 from google.adk.agents import LlmAgent
 from google.adk.tools import FunctionTool
-from schemas.label_schema import ExtractedLabel
-import vertexai
-from vertexai.generative_models import GenerativeModel, Part, Image
-import base64
+from google.genai import Client, types
 
-vertexai.init(project=os.environ["PROJECT_ID"], location="us-central1")
-
-# ---- Vision Tool ----
+# --- Tool Function ---
 def extract_label_from_image(image_path: str) -> dict:
     """
-    Takes a local image path or GCS URI.
-    Returns structured nutrient JSON from Gemini Vision.
+    Directly calls the Gemini API to extract JSON from a food label image with strict schema.
     """
-    model = GenerativeModel("gemini-2.5-flash")
+    client = Client(api_key=os.getenv("GOOGLE_API_KEY"))
+    model_id = os.getenv("GOOGLE_GENAI_MODEL", "gemini-2.0-flash")
+
+    if not os.path.exists(image_path):
+        return {"error": f"Image not found at {image_path}"}
+
+    # Detect mime type (png vs jpg)
+    mime_type, _ = mimetypes.guess_type(image_path)
+    mime_type = mime_type or "image/jpeg"
 
     with open(image_path, "rb") as f:
-        image_data = base64.b64encode(f.read()).decode("utf-8")
+        image_bytes = f.read()
 
-    image_part = Part.from_data(
-        data=base64.b64decode(image_data),
-        mime_type="image/jpeg"
-    )
+    # CRITICAL: We define the schema here to enforce the keys exactly
+    schema = {
+        "type": "OBJECT",
+        "properties": {
+            "product_name": {"type": "STRING"},
+            "brand": {"type": "STRING"},
+            "net_weight": {"type": "STRING"},
+            "health_claims": {"type": "ARRAY", "items": {"type": "STRING"}},
+            "ingredients": {"type": "ARRAY", "items": {"type": "STRING"}},
+            "nutrients": {
+                "type": "OBJECT",
+                "properties": {
+                    "total_sugars_g": {"type": "NUMBER"},
+                    "sodium_mg": {"type": "NUMBER"},
+                    "saturated_fat_g": {"type": "NUMBER"},
+                    "trans_fat_g": {"type": "NUMBER"},
+                    "total_carbs_g": {"type": "NUMBER"},
+                    "protein_g": {"type": "NUMBER"},
+                    "calories_kcal": {"type": "NUMBER"},
+                    "fiber_g": {"type": "NUMBER"}
+                },
+                "required": ["total_sugars_g", "sodium_mg", "saturated_fat_g", "calories_kcal"]
+            },
+            "fssai_license": {"type": "STRING"},
+            "extraction_confidence": {"type": "NUMBER"}
+        },
+        "required": ["product_name", "nutrients", "ingredients"]
+    }
 
-    prompt = """You are a Vision Specialist auditing Indian packaged food labels.
+    prompt = """Analyze this Indian food label image. Extract values into the provided JSON schema. 
+    If a nutrient value is missing, use 0. Ensure all nutrient keys exist."""
 
-Carefully analyze this food label image. Extract ALL visible information.
+    try:
+        response = client.models.generate_content(
+            model=model_id,
+            contents=[
+                types.Part.from_bytes(data=image_bytes, mime_type=mime_type),
+                prompt
+            ],
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json",
+                response_schema=schema, # Forces the AI to use your specific keys
+                temperature=0.1
+            )
+        )
+        
+        return response.parsed # Directly returns the validated dictionary
 
-CRITICAL: If the label is on curved packaging or has small fonts, 
-use your best estimate but lower the extraction_confidence score accordingly.
+    except Exception as e:
+        return {
+            "error": f"Extraction failed: {str(e)}", 
+            "nutrients": {
+                "calories_kcal": 0, "total_sugars_g": 0, "sodium_mg": 0, "saturated_fat_g": 0
+            },
+            "extraction_confidence": 0.0
+        }
 
-Return ONLY a valid JSON object matching this exact schema — no markdown, no explanation:
-{
-  "product_name": "string",
-  "brand": "string", 
-  "net_weight": "string or null",
-  "health_claims": ["list of all health/nutrition claims visible on pack"],
-  "ingredients": ["ingredient1", "ingredient2", "...in order as printed"],
-  "nutrients": {
-    "total_sugars_g": number or null,
-    "sodium_mg": number or null,
-    "saturated_fat_g": number or null,
-    "trans_fat_g": number or null,
-    "total_carbs_g": number or null,
-    "protein_g": number or null,
-    "calories_kcal": number or null
-  },
-  "fssai_license": "string or null",
-  "extraction_confidence": 0.0 to 1.0
-}"""
-
-    response = model.generate_content([image_part, prompt])
-    raw_json = response.text.strip()
-
-    # Strip markdown code fences if model adds them
-    if raw_json.startswith("```"):
-        raw_json = raw_json.split("```")[1]
-        if raw_json.startswith("json"):
-            raw_json = raw_json[4:]
-
-    # Validate with Pydantic
-    parsed = ExtractedLabel(**json.loads(raw_json))
-    return parsed.model_dump()
-
+# --- Agent Definition ---
 extract_label_tool = FunctionTool(func=extract_label_from_image)
 
-# ---- ADK Agent ----
 LabelExtractorAgent = LlmAgent(
     name="LabelExtractorAgent",
     model=os.getenv("GOOGLE_GENAI_MODEL", "gemini-2.5-flash"),
     description="Extracts structured nutritional data from food label images.",
-    instruction="""You are a Vision Specialist. 
-Your sole job is to call the extract_label_from_image tool with the provided image path
-and return the structured JSON result. Do not add commentary.
-If confidence is below 0.6, flag this in your response.""",
+    instruction="""You are a highly advanced Vision AI and FSSAI Data Extractor. Your job is to read food packaging labels, even if the photo is angled, blurry, or partial.
+
+1. Call the extract_label_from_image tool with the provided image_path.
+2. INFER MISSING DATA: Scan the image for the Product Name and Brand. If they aren't explicitly labeled, infer the Brand from the largest logos (e.g., "Haldiram's", "Cavin's", "Sting") and the Product Name from the main text. Do NOT default to "Unknown" if you can reasonably read the package.
+3. EXTRACT THE NUTRITION TABLE & INGREDIENTS. If an exact number is cut off, use null.
+4. CRITICAL FSSAI WARNING SCAN: You MUST scan for any fine-print warnings (e.g., "Contains Caffeine", "Not recommended for children", "Contains Artificial Sweetener"). Add these exact phrases into the "mandatory_warnings" JSON array.
+5. You MUST RETURN ONLY THE RAW JSON. No conversational text. Wrap your output in ```json blocks.""",
     tools=[extract_label_tool],
 )

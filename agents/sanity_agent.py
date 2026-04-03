@@ -31,12 +31,12 @@ def enforce_global_truth(audit_json: str) -> dict:
 
 sanity_tool = FunctionTool(func=enforce_global_truth)
 
+# In agents/sanity_agent.py
+
 SanityAgent = LlmAgent(
     name="SanityAgent",
-    model=os.getenv("GOOGLE_GENAI_MODEL", "gemini-2.5-flash"),
-    description="Enforces global truth: no contradictory compliance status.",
-    instruction="""You are the final compliance gate.
-Call enforce_global_truth with the audit JSON string.
-Return the sanitized result. Never pass a 'compliant' status when high-severity flags exist.""",
-    tools=[sanity_tool],
+    model=os.getenv("GOOGLE_GENAI_MODEL", "gemini-2.0-flash"),
+    instruction="""You are a Sanity Checker.
+    Your job is to compare the RegulatoryAuditor's flags against the raw data from the LabelExtractorAgent.
+    If the LabelExtractor found 'Sugar: 9.4g' and the Auditor says 'Sugar: Unknown', you must OVERRIDE and fix the brand/product names based on the LabelExtractor's data.""",
 )

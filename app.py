@@ -6,30 +6,24 @@ from google.adk.agents import SequentialAgent
 from google.adk.runners import InMemoryRunner
 from google.genai.types import Content, Part
 
-from agents.label_extractor     import LabelExtractorAgent
-from agents.regulatory_auditor  import RegulatoryAuditorAgent
-from agents.user_advisor        import UserAdvisorAgent
-
-from agents.sanity_agent import SanityAgent
+from agents.label_extractor    import LabelExtractorAgent
+from agents.regulatory_auditor import RegulatoryAuditorAgent
+from agents.sanity_agent       import SanityAgent
+from agents.user_advisor       import UserAdvisorAgent
+# Phase 3 agents — uncomment as you build each one:
+from agents.wellness_advisor import WellnessAdvisorAgent
+from agents.education_agent  import EducationAgent
 
 NutriGuardOrchestrator = SequentialAgent(
     name="NutriGuardOrchestrator",
-    description="FSSAI audit: Extract → Audit → Sanity → Summarise",
+    description="FSSAI audit: Extract → Audit → Sanity → Advise",
     sub_agents=[
         LabelExtractorAgent,
         RegulatoryAuditorAgent,
-        SanityAgent,          # ← new gate
+        SanityAgent,
         UserAdvisorAgent,
-    ]
-)
-# ── Orchestrator ──────────────────────────────────────────────────────────────
-NutriGuardOrchestrator = SequentialAgent(
-    name="NutriGuardOrchestrator",
-    description="FSSAI food label audit: Extract → Audit → Summarise",
-    sub_agents=[
-        LabelExtractorAgent,
-        RegulatoryAuditorAgent,
-        UserAdvisorAgent,
+        WellnessAdvisorAgent,   # uncomment after Step 4
+        EducationAgent,         # uncomment after Step 5
     ]
 )
 
@@ -38,13 +32,11 @@ USER_ID    = "local-user"
 SESSION_ID = "test-session-001"
 
 async def run_audit(image_path: str):
-    # ── InMemoryRunner owns its session service in ADK 1.x ───────────────────
     runner = InMemoryRunner(
         agent=NutriGuardOrchestrator,
         app_name=APP_NAME,
     )
 
-    # create_session is a coroutine in ADK 1.27.4
     await runner.session_service.create_session(
         app_name=APP_NAME,
         user_id=USER_ID,
