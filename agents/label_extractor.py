@@ -32,6 +32,7 @@ def extract_label_from_image(image_path: str) -> dict:
             "net_weight": {"type": "STRING"},
             "health_claims": {"type": "ARRAY", "items": {"type": "STRING"}},
             "ingredients": {"type": "ARRAY", "items": {"type": "STRING"}},
+            "mandatory_warnings": {"type": "ARRAY", "items": {"type": "STRING"}},
             "nutrients": {
                 "type": "OBJECT",
                 "properties": {

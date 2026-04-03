@@ -128,10 +128,6 @@ def query_fssai_regulations(claim: str, nutrient_context: str) -> dict:
     if not rows: return {"found": False}
     top = rows[0]
     return {
-        "found": True, "regulation_text": top[0], "similarity_score": float(top[4])
-    }
-    top = rows[0]
-    return {
         "found": True,
         "claim": claim,
         "regulation_text": top[0],
